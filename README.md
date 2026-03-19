@@ -30,3 +30,10 @@ flowchart TD
 ## Mock tools
 
 Mock tools (cancel_order, send_email) will simulate success/failure based on input (e.g., order ID 9921 cancels successfully, but 9922 fails).
+
+## Planner and The plan
+-What does the user want - Planner that can parse the NL input and create  a structured plan.
+-A plan is a DAG of steps but how to represent it?
+    -Each step will implicitly have what tool to call, with what args, and what must finish first
+    - Datamodel and DAtaclasses to represent the plan and steps should suffice.
+
