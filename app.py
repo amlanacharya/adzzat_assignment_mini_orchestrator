@@ -23,6 +23,12 @@ async def cancel_order(order_id: str) -> dict:
         raise RuntimeError(f"Order service unavailable for order {order_id}")
     return {"order_id": order_id, "cancelled": True}
 
+@register_tool
+async def send_email(email: str, message: str) -> dict:
+    """Send an email. Simulates async email dispatch."""
+    await asyncio.sleep(1.0)
+    return {"email": email, "sent": True, "message_preview": message[:80]}
+
 
 @app.get("/health")
 async def health():
