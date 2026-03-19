@@ -49,7 +49,23 @@ Mock tools (cancel_order, send_email) will simulate success/failure based on inp
 
 ## Planner and The plan
 
--What does the user want - Planner that can parse the NL input and create  a structured plan.
--A plan is a DAG of steps but how to represent it?
-    -Each step will implicitly have what tool to call, with what args, and what must finish first
-    - Datamodel and DAtaclasses to represent the plan and steps should suffice.
+- What does the user want - Planner that can parse the NL input and create  a structured plan.
+- A plan is a DAG of steps but how to represent it?
+  - Each step will implicitly have:
+    - what tool to call
+    - with what args
+    - what must finish first
+  - Datamodel and Dataclasses to represent the plan and steps should suffice.
+
+## How Do I Run the plan?
+
+- Orchestrator that can take the plan and execute it respecting dependencies.
+- Naive: run steps in order, one by one, waiting for each to finish before starting the next.
+- Better: topological sort, then run each "wave" concurrently.
+
+## Guardrails - What if something fails?.
+
+- Failure is not just about retrying. It's about propagation as well.
+- We need check dependency status before running a step. If any dependency failed, we should skip the step and mark it as SKIPPED in the final response.
+
+
