@@ -1,8 +1,11 @@
 # Mini Agent Orchestrator
+
 A lightweight, event-driven order processing agent that receives natural language
 requests, decomposes them into an executable plan, and runs async tools with
 dependency-aware orchestration.
+
 ## Problem
+
 Given: "Cancel my order 9921 and email me the confirmation at user@example.com."
 The system should:
 
@@ -11,7 +14,7 @@ Execute mock tools asynchronously -Tool Executor/Tools
 Respect dependencies between steps -Orchestrator
 Handle failures gracefully i.e don't send email if cancellation failed-Failure Handlinganmd Guardrails
 
-## Initial Design Sketch
+## Overall Design Sketch
 
 ```mermaid
 flowchart TD
@@ -68,4 +71,47 @@ Mock tools (cancel_order, send_email) will simulate success/failure based on inp
 - Failure is not just about retrying. It's about propagation as well.
 - We need check dependency status before running a step. If any dependency failed, we should skip the step and mark it as SKIPPED in the final response.
 
+## API Endpoint-How do I expose this? (API)
 
+- Single endpoint. Stateless request/response.
+- The plan + execution results are the response. No need for job queues,
+  polling, webhooks for now.
+- Return the full trace (every step's status, result, error) so the caller
+  can debug without asking the server.
+
+
+## Quick Start
+
+```bash
+pip install -r requirements.txt
+
+uvicorn app:app --reload
+
+# For with OpenAI
+export OPENAI_API_KEY=sk-
+uvicorn app:app --reload
+```
+
+### Error Handling Strategy
+
+| Scenario                                  | Behavior                                                                     |
+| ----------------------------------------- | ---------------------------------------------------------------------------- |
+| `cancel_order` fails (20% chance)         | Step marked `FAILED`. Downstream `send_email` is `SKIPPED` with explanation. |
+| Unknown tool in plan                      | Step marked `FAILED` with "Unknown tool" error. Dependents skipped.          |
+| LLM returns unparseable JSON              | HTTP 400 returned before execution starts.                                   |
+| LLM API timeout / 5xx                     | HTTP 502 with error detail.                                                  |
+| Request has no recognizable intent (mock) | HTTP 400: "could not parse request".                                         |
+|                                           |                                                                              |
+
+The core guardrail: **failed steps poison their dependents**. This prevents false workflows like sending a "cancellation confirmed" email when the cancellation actually failed.
+
+## Why These Choices
+
+- **FastAPI + async**: Natural fit for I/O-bound tool calls. `asyncio.gather` for concurrent execution.
+- **Dataclasses for Steps, Pydantic for API**: Dataclasses are lighter for internal state; Pydantic handles serialization/validation at the API boundary.
+- **No database**: For a stateless request-response agent, in-memory plan state is sufficient. A production version would persist plans to a store for auditability.
+- **Registry pattern for tools**: Decouples tool definition from orchestration. New tools don't touch orchestrator code.
+
+### Note 
+
+Single-module by design for a assignment of this scope. Production would split into planner.py, tools.py, orchestrator.py, api.py.
