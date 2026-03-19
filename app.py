@@ -12,7 +12,7 @@ app = FastAPI(
 TOOL_REGISTRY: dict[str, Any] = {}
 
 def register_tool(fn):
-    TOOL_REGISTRY[fn.name] = fn
+    TOOL_REGISTRY[fn.__name__] = fn
     return fn
 
 @register_tool
