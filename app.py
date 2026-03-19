@@ -152,6 +152,36 @@ async def plan_with_openai(user_request: str) -> Plan:
     return _parse_plan(raw)
 
 
+async def execute_plan(plan: Plan) -> list[dict]:
+    """Execute plan steps sequentially."""
+    for step in plan.steps:
+        tool_fn = TOOL_REGISTRY.get(step.tool)
+        if not tool_fn:
+            step.status = StepStatus.FAILED
+            step.error = f"Unknown tool: {step.tool}"
+            continue  
+
+        step.status = StepStatus.RUNNING
+        try:
+            step.result = await tool_fn(**step.args)
+            step.status = StepStatus.SUCCESS
+        except Exception as exc:
+            step.status = StepStatus.FAILED
+            step.error = str(exc)
+
+    return [
+        {
+            "id": s.id,
+            "tool": s.tool,
+            "args": s.args,
+            "status": s.status.value,
+            "result": s.result,
+            "error": s.error,
+        }
+        for s in plan.steps
+    ]
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok","tools": list(TOOL_REGISTRY.keys())}
