@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 import re
 import os
 import httpx
+import time
+from fastapi import HTTPException
+from pydantic import BaseModel
 
-app = FastAPI(
-    title="Mini Agent Orchestrator",
-    description="An Event driven Order Processing Agent",
-)
+
 
 class StepStatus(str, Enum):
     PENDING = "pending"
@@ -219,6 +219,73 @@ async def _run_step(step: Step):
     except Exception as exc:
         step.status = StepStatus.FAILED
         step.error = str(exc)
+
+app = FastAPI(
+    title="Mini Agent Orchestrator",
+    description="An Event driven Order Processing Agent",
+)
+class AgentRequest(BaseModel):
+    request: str
+    use_mock_planner: bool = True
+
+
+class StepResult(BaseModel):
+    id: str
+    tool: str
+    args: dict
+    status: str
+    result: Any = None
+    error: str | None = None
+
+
+class AgentResponse(BaseModel):
+    request: str
+    plan_raw: str
+    steps: list[StepResult]
+    overall_status: str
+    elapsed_seconds: float
+
+
+@app.post("/agent", response_model=AgentResponse)
+async def process_request(req: AgentRequest):
+    """
+    Single API endpoint.
+    Receives a natural language request, plans, executes tools, returns results.
+    """
+    start = time.monotonic()
+
+    # 1. Plan
+    try:
+        if req.use_mock_planner:
+            plan = plan_with_mock(req.request)
+        else:
+            plan = await plan_with_openai(req.request)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Planning failed: {exc}")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"LLM API error: {exc}")
+
+    # 2. Execute
+    results = await execute_plan(plan)
+
+    # 3. Determine overall status
+    statuses = {r["status"] for r in results}
+    if StepStatus.FAILED.value in statuses or StepStatus.SKIPPED.value in statuses:
+        overall = "partial_failure"
+    elif all(r["status"] == StepStatus.SUCCESS.value for r in results):
+        overall = "success"
+    else:
+        overall = "unknown"
+
+    elapsed = time.monotonic() - start
+
+    return AgentResponse(
+        request=req.request,
+        plan_raw=plan.raw_llm_output,
+        steps=[StepResult(**r) for r in results],
+        overall_status=overall,
+        elapsed_seconds=round(elapsed, 3),
+    )
 
 
 @app.get("/health")
