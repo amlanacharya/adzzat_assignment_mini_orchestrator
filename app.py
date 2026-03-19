@@ -153,21 +153,43 @@ async def plan_with_openai(user_request: str) -> Plan:
 
 
 async def execute_plan(plan: Plan) -> list[dict]:
-    """Execute plan steps sequentially."""
-    for step in plan.steps:
-        tool_fn = TOOL_REGISTRY.get(step.tool)
-        if not tool_fn:
-            step.status = StepStatus.FAILED
-            step.error = f"Unknown tool: {step.tool}"
-            continue  
+    """
+    Execute plan steps respecting dependency ordering.
 
-        step.status = StepStatus.RUNNING
-        try:
-            step.result = await tool_fn(**step.args)
-            step.status = StepStatus.SUCCESS
-        except Exception as exc:
-            step.status = StepStatus.FAILED
-            step.error = str(exc)
+    Guardrail: if any dependency failed, the dependent step is SKIPPED.
+    Steps with no unmet dependencies can run concurrently.
+    """
+    step_map: dict[str, Step] = {s.id: s for s in plan.steps}
+    completed: set[str] = set()
+
+    while True:
+        ready = [
+            s for s in plan.steps
+            if s.status == StepStatus.PENDING
+            and all(d in completed for d in s.depends_on)
+        ]
+        if not ready:
+            break
+
+        tasks = []
+        for step in ready:
+            failed_deps = [
+                d for d in step.depends_on
+                if step_map[d].status == StepStatus.FAILED
+            ]
+            if failed_deps:
+                step.status = StepStatus.SKIPPED
+                step.error = f"Skipped: upstream step(s) {failed_deps} failed"
+                completed.add(step.id)
+                continue
+
+            tasks.append(_run_step(step))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+        for step in ready:
+            completed.add(step.id)
 
     return [
         {
@@ -180,6 +202,23 @@ async def execute_plan(plan: Plan) -> list[dict]:
         }
         for s in plan.steps
     ]
+
+
+async def _run_step(step: Step):
+    """Execute a single step by looking up the tool and calling it."""
+    tool_fn = TOOL_REGISTRY.get(step.tool)
+    if not tool_fn:
+        step.status = StepStatus.FAILED
+        step.error = f"Unknown tool: {step.tool}"
+        return
+
+    step.status = StepStatus.RUNNING
+    try:
+        step.result = await tool_fn(**step.args)
+        step.status = StepStatus.SUCCESS
+    except Exception as exc:
+        step.status = StepStatus.FAILED
+        step.error = str(exc)
 
 
 @app.get("/health")

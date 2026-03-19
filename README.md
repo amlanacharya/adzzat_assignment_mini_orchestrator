@@ -61,3 +61,11 @@ Mock tools (cancel_order, send_email) will simulate success/failure based on inp
 
 - Orchestrator that can take the plan and execute it respecting dependencies.
 - Naive: run steps in order, one by one, waiting for each to finish before starting the next.
+- Better: topological sort, then run each "wave" concurrently.
+
+## Guardrails - What if something fails?.
+
+- Failure is not just about retrying. It's about propagation as well.
+- We need check dependency status before running a step. If any dependency failed, we should skip the step and mark it as SKIPPED in the final response.
+
+
