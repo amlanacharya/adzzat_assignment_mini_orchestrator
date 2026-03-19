@@ -6,7 +6,8 @@ import json
 from enum import Enum
 from dataclasses import dataclass, field
 import re
-
+import os
+import httpx
 
 app = FastAPI(
     title="Mini Agent Orchestrator",
@@ -106,6 +107,49 @@ def _parse_plan(raw: str) -> Plan:
         for s in data
     ]
     return Plan(steps=steps, raw_llm_output=raw)
+
+
+PLAN_SYSTEM_PROMPT = """You are a task planner for an order processing system.
+
+Given a user request, output a JSON array of steps. Each step has:
+- "id": unique step identifier (e.g. "step_1")
+- "tool": one of ["cancel_order", "send_email"]
+- "args": dict of arguments for the tool
+- "depends_on": list of step ids that must succeed before this step runs
+
+Tool signatures:
+- cancel_order(order_id: str) -> cancels an order
+- send_email(email: str, message: str) -> sends an email
+
+Rules:
+- If sending an email depends on a prior step succeeding, list that step in depends_on.
+- Extract order IDs, email addresses, and compose appropriate messages from context.
+- Output ONLY the JSON array, no markdown fences, no explanation."""
+
+
+
+async def plan_with_openai(user_request: str) -> Plan:
+    """Call OpenAI API to parse NL into a step plan."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not set. Use mock planner or set the key.")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": "gpt-4o-mini",
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": PLAN_SYSTEM_PROMPT}, #TODO:Revisit for open ai key testing.
+                    {"role": "user", "content": user_request},
+                ],
+            },
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"]
+    return _parse_plan(raw)
 
 
 @app.get("/health")

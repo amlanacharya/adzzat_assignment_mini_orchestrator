@@ -15,16 +15,32 @@ Handle failures gracefully i.e don't send email if cancellation failed-Failure H
 
 ```mermaid
 flowchart TD
-    A[User Request (NL)] --> B[Planner]
-    B --> C[Step DAG: {cancel_order 9921}, {send_email depends_on: cancel}]
-    C --> D[Orchestrator]
-    D --> E[Tool Results + Overall Status]
+    A["POST /agent<br><i>Natural language request</i>"] --> B["Planner"]
+    B --> B1["Mock (regex)"]
+    B --> B2["OpenAI (gpt-4o-mini)"]
+    B1 --> C["Step DAG<br><i>steps + depends_on edges</i>"]
+    B2 --> C
+    C --> D["Orchestrator<br><i>Wave-based async execution</i>"]
+    D --> G{"Guardrail<br>pre-check"}
+    G -->|deps OK| E1["cancel_order<br><i>20% failure</i>"]
+    G -->|deps OK| E2["send_email<br><i>1s async</i>"]
+    G -->|dep failed| SK["SKIPPED"]
+    E1 -->|success| F["AgentResponse<br><i>steps + overall_status</i>"]
+    E1 -->|failure| SK
+    E2 --> F
+    SK --> F
 
-    B:::planner
-    D:::orchestrator
+    classDef planner fill:#EEEDFE,stroke:#534AB7,stroke-width:1px,color:#3C3489
+    classDef orchestrator fill:#E6F1FB,stroke:#185FA5,stroke-width:1px,color:#0C447C
+    classDef tool fill:#EAF3DE,stroke:#3B6D11,stroke-width:1px,color:#27500A
+    classDef guardrail fill:#FAECE7,stroke:#993C1D,stroke-width:1px,color:#712B13
+    classDef neutral fill:#F1EFE8,stroke:#5F5E5A,stroke-width:1px,color:#444441
 
-    classDef planner fill:#f9f,stroke:#333,stroke-width:2px;
-    classDef orchestrator fill:#bbf,stroke:#333,stroke-width:2px;
+    class B,B1,B2 planner
+    class D orchestrator
+    class E1,E2 tool
+    class G,SK guardrail
+    class A,C,F neutral
 ```
 
 ## Mock tools
@@ -32,8 +48,8 @@ flowchart TD
 Mock tools (cancel_order, send_email) will simulate success/failure based on input (e.g., order ID 9921 cancels successfully, but 9922 fails).
 
 ## Planner and The plan
+
 -What does the user want - Planner that can parse the NL input and create  a structured plan.
 -A plan is a DAG of steps but how to represent it?
     -Each step will implicitly have what tool to call, with what args, and what must finish first
     - Datamodel and DAtaclasses to represent the plan and steps should suffice.
-
