@@ -1,0 +1,332 @@
+"""
+Mini Agent Orchestrator
+-----------------------
+Event-driven order processing agent with:
+- LLM-based planner (OpenAI or mock)
+- Async tool execution with dependency resolution
+- Guardrails: conditional execution based on upstream results
+"""
+
+import asyncio
+import json
+import random
+import time
+import os
+import re
+from enum import Enum
+from dataclasses import dataclass, field
+from typing import Any
+
+import httpx
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+
+# ---------------------------------------------------------------------------
+# Domain types
+# ---------------------------------------------------------------------------
+
+class StepStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+@dataclass
+class Step:
+    id: str
+    tool: str
+    args: dict[str, Any]
+    depends_on: list[str] = field(default_factory=list)
+    status: StepStatus = StepStatus.PENDING
+    result: Any = None
+    error: str | None = None
+
+
+@dataclass
+class Plan:
+    steps: list[Step]
+    raw_llm_output: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Tool registry (mock async tools)
+# ---------------------------------------------------------------------------
+
+TOOL_REGISTRY: dict[str, Any] = {}
+
+
+def register_tool(fn):
+    TOOL_REGISTRY[fn.__name__] = fn
+    return fn
+
+
+@register_tool
+async def cancel_order(order_id: str) -> dict:
+    """Cancel an order. Simulates 20% random failure rate."""
+    await asyncio.sleep(0.3)  # simulate latency
+    if random.random() < 0.2:
+        raise RuntimeError(f"Order service unavailable for order {order_id}")
+    return {"order_id": order_id, "cancelled": True}
+
+
+@register_tool
+async def send_email(email: str, message: str) -> dict:
+    """Send an email. Simulates async email dispatch."""
+    await asyncio.sleep(1.0)  # simulate email send latency
+    return {"email": email, "sent": True, "message_preview": message[:80]}
+
+
+# ---------------------------------------------------------------------------
+# Planner: LLM-based NL -> step DAG
+# ---------------------------------------------------------------------------
+
+PLAN_SYSTEM_PROMPT = """You are a task planner for an order processing system.
+
+Given a user request, output a JSON array of steps. Each step has:
+- "id": unique step identifier (e.g. "step_1")
+- "tool": one of ["cancel_order", "send_email"]
+- "args": dict of arguments for the tool
+- "depends_on": list of step ids that must succeed before this step runs
+
+Tool signatures:
+- cancel_order(order_id: str) -> cancels an order
+- send_email(email: str, message: str) -> sends an email
+
+Rules:
+- If sending an email depends on a prior step succeeding, list that step in depends_on.
+- Extract order IDs, email addresses, and compose appropriate messages from context.
+- Output ONLY the JSON array, no markdown fences, no explanation."""
+
+
+async def plan_with_openai(user_request: str) -> Plan:
+    """Call OpenAI API to parse NL into a step plan."""
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not set. Use mock planner or set the key.")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": "gpt-4o-mini",
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": PLAN_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_request},
+                ],
+            },
+        )
+        resp.raise_for_status()
+        raw = resp.json()["choices"][0]["message"]["content"]
+    return _parse_plan(raw)
+
+
+def plan_with_mock(user_request: str) -> Plan:
+    """Deterministic mock planner. Parses common patterns without an LLM."""
+    text = user_request.lower()
+
+    order_match = re.search(r"#?(\d{4,})", user_request)
+    email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w]+(?:\.[\w]+)*", user_request)
+
+    steps: list[dict] = []
+
+    if "cancel" in text and order_match:
+        steps.append({
+            "id": "step_1",
+            "tool": "cancel_order",
+            "args": {"order_id": order_match.group(1)},
+            "depends_on": [],
+        })
+
+    if email_match:
+        order_id = order_match.group(1) if order_match else "unknown"
+        email_step = {
+            "id": f"step_{len(steps) + 1}",
+            "tool": "send_email",
+            "args": {
+                "email": email_match.group(0),
+                "message": f"Your order #{order_id} has been cancelled successfully.",
+            },
+            "depends_on": [s["id"] for s in steps],  # email depends on all prior steps
+        }
+        steps.append(email_step)
+
+    if not steps:
+        raise ValueError(f"Mock planner could not parse request: {user_request}")
+
+    raw = json.dumps(steps)
+    return _parse_plan(raw)
+
+
+def _parse_plan(raw: str) -> Plan:
+    """Parse raw JSON string into a Plan with Steps."""
+    cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()
+    data = json.loads(cleaned)
+    steps = [
+        Step(
+            id=s["id"],
+            tool=s["tool"],
+            args=s.get("args", {}),
+            depends_on=s.get("depends_on", []),
+        )
+        for s in data
+    ]
+    return Plan(steps=steps, raw_llm_output=raw)
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator: executes the plan respecting dependencies and guardrails
+# ---------------------------------------------------------------------------
+
+async def execute_plan(plan: Plan) -> list[dict]:
+    """
+    Execute plan steps respecting dependency ordering.
+
+    Guardrail: if any dependency failed, the dependent step is SKIPPED.
+    Steps with no unmet dependencies can run concurrently.
+    """
+    step_map: dict[str, Step] = {s.id: s for s in plan.steps}
+    completed: set[str] = set()
+
+    while True:
+        # find steps that are ready: pending + all deps resolved
+        ready = [
+            s for s in plan.steps
+            if s.status == StepStatus.PENDING
+            and all(d in completed for d in s.depends_on)
+        ]
+        if not ready:
+            break
+
+        tasks = []
+        for step in ready:
+            # guardrail: skip if any dependency failed
+            failed_deps = [
+                d for d in step.depends_on
+                if step_map[d].status == StepStatus.FAILED
+            ]
+            if failed_deps:
+                step.status = StepStatus.SKIPPED
+                step.error = f"Skipped: upstream step(s) {failed_deps} failed"
+                completed.add(step.id)
+                continue
+
+            tasks.append(_run_step(step))
+
+        if tasks:
+            await asyncio.gather(*tasks)
+
+        for step in ready:
+            completed.add(step.id)
+
+    return [
+        {
+            "id": s.id,
+            "tool": s.tool,
+            "args": s.args,
+            "status": s.status.value,
+            "result": s.result,
+            "error": s.error,
+        }
+        for s in plan.steps
+    ]
+
+
+async def _run_step(step: Step):
+    """Execute a single step by looking up the tool and calling it."""
+    tool_fn = TOOL_REGISTRY.get(step.tool)
+    if not tool_fn:
+        step.status = StepStatus.FAILED
+        step.error = f"Unknown tool: {step.tool}"
+        return
+
+    step.status = StepStatus.RUNNING
+    try:
+        step.result = await tool_fn(**step.args)
+        step.status = StepStatus.SUCCESS
+    except Exception as exc:
+        step.status = StepStatus.FAILED
+        step.error = str(exc)
+
+
+# ---------------------------------------------------------------------------
+# FastAPI application
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="Mini Agent Orchestrator",
+    description="Event-driven order processing agent with LLM planning and async tool execution",
+)
+
+
+class AgentRequest(BaseModel):
+    request: str
+    use_mock_planner: bool = True
+
+
+class StepResult(BaseModel):
+    id: str
+    tool: str
+    args: dict
+    status: str
+    result: Any = None
+    error: str | None = None
+
+
+class AgentResponse(BaseModel):
+    request: str
+    plan_raw: str
+    steps: list[StepResult]
+    overall_status: str
+    elapsed_seconds: float
+
+
+@app.post("/agent", response_model=AgentResponse)
+async def process_request(req: AgentRequest):
+    """
+    Single API endpoint.
+    Receives a natural language request, plans, executes tools, returns results.
+    """
+    start = time.monotonic()
+
+    # 1. Plan
+    try:
+        if req.use_mock_planner:
+            plan = plan_with_mock(req.request)
+        else:
+            plan = await plan_with_openai(req.request)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Planning failed: {exc}")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(status_code=502, detail=f"LLM API error: {exc}")
+
+    # 2. Execute
+    results = await execute_plan(plan)
+
+    # 3. Determine overall status
+    statuses = {r["status"] for r in results}
+    if StepStatus.FAILED.value in statuses or StepStatus.SKIPPED.value in statuses:
+        overall = "partial_failure"
+    elif all(r["status"] == StepStatus.SUCCESS.value for r in results):
+        overall = "success"
+    else:
+        overall = "unknown"
+
+    elapsed = time.monotonic() - start
+
+    return AgentResponse(
+        request=req.request,
+        plan_raw=plan.raw_llm_output,
+        steps=[StepResult(**r) for r in results],
+        overall_status=overall,
+        elapsed_seconds=round(elapsed, 3),
+    )
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "tools": list(TOOL_REGISTRY.keys())}
