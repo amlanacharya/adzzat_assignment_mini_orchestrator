@@ -5,6 +5,8 @@ import random
 import json
 from enum import Enum
 from dataclasses import dataclass, field
+import re
+
 
 app = FastAPI(
     title="Mini Agent Orchestrator",
@@ -32,18 +34,6 @@ class Plan:
     raw_llm_output: str = ""
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 TOOL_REGISTRY: dict[str, Any] = {}
 
 def register_tool(fn):
@@ -63,6 +53,59 @@ async def send_email(email: str, message: str) -> dict:
     """Send an email. Simulates async email dispatch."""
     await asyncio.sleep(1.0)
     return {"email": email, "sent": True, "message_preview": message[:80]}
+
+
+def plan_with_mock(user_request: str) -> Plan:
+    """Deterministic mock planner. Parses common patterns without an LLM."""
+    text = user_request.lower()
+ 
+    order_match = re.search(r"#?(\d{4,})", user_request)
+    email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w]+(?:\.[\w]+)*", user_request)
+ 
+    steps: list[dict] = []
+ 
+    if "cancel" in text and order_match:
+        steps.append({
+            "id": "step_1",
+            "tool": "cancel_order",
+            "args": {"order_id": order_match.group(1)},
+            "depends_on": [],
+        })
+ 
+    if email_match:
+        order_id = order_match.group(1) if order_match else "unknown"
+        email_step = {
+            "id": f"step_{len(steps) + 1}",
+            "tool": "send_email",
+            "args": {
+                "email": email_match.group(0),
+                "message": f"Your order #{order_id} has been cancelled successfully.",
+            },
+            "depends_on": [s["id"] for s in steps],  
+        }
+        steps.append(email_step)
+ 
+    if not steps:
+        raise ValueError(f"Mock planner could not parse request: {user_request}")
+ 
+    raw = json.dumps(steps)
+    return _parse_plan(raw)
+ 
+ 
+def _parse_plan(raw: str) -> Plan:
+    """Parse raw JSON string into a Plan with Steps."""
+    cleaned = raw.strip().removeprefix("```json").removesuffix("```").strip()
+    data = json.loads(cleaned)
+    steps = [
+        Step(
+            id=s["id"],
+            tool=s["tool"],
+            args=s.get("args", {}),
+            depends_on=s.get("depends_on", []),
+        )
+        for s in data
+    ]
+    return Plan(steps=steps, raw_llm_output=raw)
 
 
 @app.get("/health")
