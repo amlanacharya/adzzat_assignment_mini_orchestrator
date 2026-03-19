@@ -20,7 +20,7 @@ async def cancel_order(order_id: str) -> dict:
     """Cancel an order. Simulates 20% random failure rate."""
     await asyncio.sleep(0.3)
     if random.random() < 0.2:
-        raise RuntimeError(f"Order service unavailable for order {order_id}")
+        raise RuntimeError(f"Order service unavailable - failed to cancel order {order_id}")
     return {"order_id": order_id, "cancelled": True}
 
 @register_tool
