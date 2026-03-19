@@ -2,12 +2,47 @@ from fastapi import FastAPI
 from typing import Any
 import asyncio
 import random
-
+import json
+from enum import Enum
+from dataclasses import dataclass, field
 
 app = FastAPI(
     title="Mini Agent Orchestrator",
     description="An Event driven Order Processing Agent",
 )
+
+class StepStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+@dataclass
+class Step:
+    id: str
+    tool: str
+    args: dict[str, Any]
+    depends_on: list[str] = field(default_factory=list)
+    status: StepStatus = StepStatus.PENDING
+    result: Any = None
+    error: str | None = None
+@dataclass
+class Plan:
+    steps: list[Step]
+    raw_llm_output: str = ""
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 TOOL_REGISTRY: dict[str, Any] = {}
 
