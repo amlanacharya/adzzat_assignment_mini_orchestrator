@@ -92,6 +92,19 @@ export OPENAI_API_KEY=sk-
 uvicorn app:app --reload
 ```
 
+### Error Handling Strategy
+
+| Scenario                                  | Behavior                                                                     |
+| ----------------------------------------- | ---------------------------------------------------------------------------- |
+| `cancel_order` fails (20% chance)         | Step marked `FAILED`. Downstream `send_email` is `SKIPPED` with explanation. |
+| Unknown tool in plan                      | Step marked `FAILED` with "Unknown tool" error. Dependents skipped.          |
+| LLM returns unparseable JSON              | HTTP 400 returned before execution starts.                                   |
+| LLM API timeout / 5xx                     | HTTP 502 with error detail.                                                  |
+| Request has no recognizable intent (mock) | HTTP 400: "could not parse request".                                         |
+|                                           |                                                                              |
+
+The core guardrail: **failed steps poison their dependents**. This prevents false workflows like sending a "cancellation confirmed" email when the cancellation actually failed.
+
 ## Why These Choices
 
 - **FastAPI + async**: Natural fit for I/O-bound tool calls. `asyncio.gather` for concurrent execution.
